@@ -14,7 +14,9 @@ import re
 import random
 import secrets
 import sqlite3
+import ssl
 import time
+from urllib.parse import unquote, urlparse
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -24,6 +26,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "nirapod.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL")  # Supabase/Postgres; if unset, local SQLite is used
+USE_PG = bool(DATABASE_URL)
 DIST_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "dist"))
 TOKEN_MAX_AGE = 60 * 60 * 12  # 12 hours
 HASH_METHOD = "pbkdf2:sha256:600000"
@@ -33,7 +37,7 @@ def _load_secret():
     env = os.environ.get("SECRET_KEY")
     if env:
         return env
-    path = os.path.join(os.path.dirname(DB_PATH), ".secret_key")
+    path = os.path.join(BASE_DIR if USE_PG else os.path.dirname(DB_PATH), ".secret_key")
     if os.path.exists(path):
         return open(path).read().strip()
     key = secrets.token_hex(32)
@@ -69,7 +73,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   user_id INTEGER NOT NULL REFERENCES users(id),
   account_type TEXT NOT NULL,               -- savings | current
   account_number TEXT UNIQUE,
-  balance_paisa INTEGER NOT NULL DEFAULT 0,
+  balance_paisa BIGINT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
   reason TEXT,
   created_at TEXT NOT NULL,
@@ -84,7 +88,7 @@ CREATE TABLE IF NOT EXISTS cards (
   number TEXT,
   expiry TEXT,
   holder TEXT NOT NULL,
-  credit_limit_paisa INTEGER NOT NULL DEFAULT 0,
+  credit_limit_paisa BIGINT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | blocked
   reason TEXT,
   created_at TEXT NOT NULL,
@@ -97,14 +101,87 @@ CREATE TABLE IF NOT EXISTS audit (
   target TEXT NOT NULL,
   at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_account ON accounts(user_id) WHERE status IN ('pending','approved');
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_card ON cards(user_id, network, card_type) WHERE status IN ('pending','approved');
 """
+
+# Supabase exposes public tables through its REST API. RLS on + no policies = that API
+# cannot read these tables; this server connects directly and is not affected.
+RLS = [f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY" for t in ("users", "accounts", "cards", "audit")]
+
+
+class Row(dict):
+    """dict that also supports row[0], like sqlite3.Row."""
+
+    def __getitem__(self, k):
+        return list(self.values())[k] if isinstance(k, int) else super().__getitem__(k)
+
+
+class Cursor:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def _rows(self, raw):
+        names = [c[0] for c in self.cur.description]
+        return [Row(zip(names, r)) for r in raw]
+
+    def fetchone(self):
+        raw = self.cur.fetchone()
+        return self._rows([raw])[0] if raw else None
+
+    def fetchall(self):
+        return self._rows(self.cur.fetchall())
+
+
+class DB:
+    """Same tiny interface for SQLite and Postgres (pg8000): execute / commit / rollback / close."""
+
+    def __init__(self):
+        if USE_PG:
+            import pg8000.dbapi
+
+            u = urlparse(DATABASE_URL)
+            ctx = ssl.create_default_context()
+            if os.environ.get("DB_SSL_INSECURE") == "1":  # only if certificate verification fails
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            self.conn = pg8000.dbapi.connect(
+                user=unquote(u.username or ""), password=unquote(u.password or ""),
+                host=u.hostname, port=u.port or 5432,
+                database=(u.path or "/postgres").lstrip("/") or "postgres", ssl_context=ctx,
+            )
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def execute(self, sql, args=()):
+        cur = self.conn.cursor()
+        if USE_PG:
+            sql = sql.replace("?", "%s")
+        cur.execute(sql, tuple(args))
+        return Cursor(cur)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
+def is_unique_violation(exc):
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    if USE_PG and exc.args and isinstance(exc.args[0], dict):
+        return exc.args[0].get("C") == "23505"
+    return False
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = DB()
     return g.db
 
 
@@ -120,9 +197,13 @@ def now():
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    db = sqlite3.connect(DB_PATH)
-    db.executescript(SCHEMA)
+    if not USE_PG:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db = DB()
+    schema = SCHEMA.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY") if USE_PG else SCHEMA
+    for stmt in [x.strip() for x in schema.split(";") if x.strip()] + (RLS if USE_PG else []):
+        db.execute(stmt)
+    db.commit()
     has_admin = db.execute("SELECT 1 FROM users WHERE role='admin'").fetchone()
     if not has_admin:
         email = os.environ.get("ADMIN_EMAIL", "admin@nirapod.local").lower()
@@ -145,6 +226,7 @@ def init_db():
             print("Set ADMIN_PASSWORD to choose your own.")
         print("=" * 60)
     db.close()
+    print("Database:", "Postgres (Supabase)" if USE_PG else f"SQLite ({DB_PATH})")
 
 
 # ------------------------------------------------------------------- helpers
@@ -311,8 +393,11 @@ def register():
             (name, phone, email, generate_password_hash(password, method=HASH_METHOD), now()),
         )
         db.commit()
-    except sqlite3.IntegrityError:
-        return err("This phone number or email is already registered", 409)
+    except Exception as e:
+        db.rollback()
+        if is_unique_violation(e):
+            return err("This phone number or email is already registered", 409)
+        raise
     return jsonify({"ok": True, "status": "pending",
                     "message": "Registration received. You can log in after an admin approves your account."}), 201
 
@@ -389,9 +474,15 @@ def apply_account():
     ).fetchone()
     if open_one:
         return err("You already have an account or a pending application", 409)
-    db.execute("INSERT INTO accounts (user_id, account_type, created_at) VALUES (?,?,?)",
-               (g.user["id"], kind, now()))
-    db.commit()
+    try:
+        db.execute("INSERT INTO accounts (user_id, account_type, created_at) VALUES (?,?,?)",
+                   (g.user["id"], kind, now()))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if is_unique_violation(e):
+            return err("You already have an account or a pending application", 409)
+        raise
     return jsonify({"ok": True, "message": "Application submitted. An admin will review it."}), 201
 
 
@@ -413,11 +504,17 @@ def apply_card():
     ).fetchone()
     if dup:
         return err("You already have this card or a pending application for it", 409)
-    db.execute(
-        "INSERT INTO cards (user_id, account_id, network, card_type, holder, created_at) VALUES (?,?,?,?,?,?)",
-        (g.user["id"], acc["id"], network, ctype, g.user["name"].upper()[:26], now()),
-    )
-    db.commit()
+    try:
+        db.execute(
+            "INSERT INTO cards (user_id, account_id, network, card_type, holder, created_at) VALUES (?,?,?,?,?,?)",
+            (g.user["id"], acc["id"], network, ctype, g.user["name"].upper()[:26], now()),
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        if is_unique_violation(e):
+            return err("You already have this card or a pending application for it", 409)
+        raise
     return jsonify({"ok": True, "message": "Card application submitted."}), 201
 
 
@@ -442,7 +539,7 @@ def audit(action, target):
 @auth_required(("admin",))
 def admin_stats():
     db = get_db()
-    q = lambda sql: db.execute(sql).fetchone()[0]
+    q = lambda sql: int(db.execute(sql).fetchone()[0])
     return jsonify({
         "pendingUsers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='pending'"),
         "customers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='approved'"),

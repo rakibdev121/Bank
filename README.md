@@ -34,11 +34,21 @@ A premium, mobile-first digital banking prototype for Bangladesh. Built as a **l
 
 ## Getting Started
 
-### Backend (Flask + SQLite) — works in Termux, only needs `flask`
+### Database: Supabase (Postgres) or local SQLite
+
+Set `DATABASE_URL` to your Supabase **Session pooler** connection string and the backend uses Supabase (tables are created automatically, with Row Level Security enabled). Without `DATABASE_URL` it falls back to local SQLite.
+
+```bash
+export DATABASE_URL='postgresql://postgres.xxxx:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres'
+```
+
+If the password has special characters (`@ # / :`) URL-encode them. If you get an SSL certificate error, add `export DB_SSL_INSECURE=1` as a last resort.
+
+### Backend (Flask) — works in Termux, only needs `flask`
 
 ```bash
 cd backend
-pip install -r requirements.txt
+pip install flask pg8000   # (or: pip install -r requirements.txt)
 export ADMIN_PASSWORD='choose-a-strong-password'   # admin login: admin@nirapod.local
 python app.py                                       # http://localhost:5000
 ```
