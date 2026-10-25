@@ -1,14 +1,13 @@
 import React, { useState, useMemo } from 'react';
 import { Search, ArrowDownLeft, ArrowUpRight, Filter, Inbox } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { formatBDT, formatDate, formatTime } from '../data/mockData';
-import { Badge, EmptyState, DemoBanner } from '../components/ui';
+import { formatBDT, formatDate, formatTime } from '../utils/format';
+import { Badge, EmptyState } from '../components/ui';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
   { id: 'received', label: 'Received' },
   { id: 'sent', label: 'Sent' },
-  { id: 'pending', label: 'Pending' },
 ];
 
 export default function Activity({ onNavigate }) {
@@ -20,7 +19,6 @@ export default function Activity({ onNavigate }) {
     let list = [...transactions];
     if (filter === 'received') list = list.filter((t) => t.type === 'received');
     if (filter === 'sent') list = list.filter((t) => t.type === 'sent');
-    if (filter === 'pending') list = list.filter((t) => t.status === 'pending');
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -35,10 +33,9 @@ export default function Activity({ onNavigate }) {
 
   return (
     <div className="pb-24 page-enter">
-      <DemoBanner />
       <header className="px-5 pt-6 pb-3">
         <h1 className="text-xl font-bold text-navy-900 dark:text-white">Activity</h1>
-        <p className="text-sm text-slate-500 mt-0.5">All demo transactions</p>
+        <p className="text-sm text-slate-500 mt-0.5">All your transactions</p>
       </header>
 
       <div className="px-5 mb-4">
@@ -78,7 +75,7 @@ export default function Activity({ onNavigate }) {
             description={
               search || filter !== 'all'
                 ? 'Try adjusting your search or filters.'
-                : 'Your demo transaction history will appear here.'
+                : 'Your transaction history will appear here.'
             }
           />
         ) : (

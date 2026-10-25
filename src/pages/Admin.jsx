@@ -1,49 +1,41 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Users, Wallet, CreditCard, Landmark, Shield, RefreshCw } from 'lucide-react';
+import {
+  Shield, LayoutDashboard, Coins, Banknote, ArrowLeftRight, UserCheck, LogOut, ArrowLeft, Sun, Moon, Lock,
+} from 'lucide-react';
 import { api } from '../api';
-import { formatBDT } from '../data/mockData';
-import { Badge, LoadingSpinner, Modal } from '../components/ui';
+import { useApp } from '../context/AppContext';
+import { LoadingSpinner } from '../components/ui';
+import { useAdminCall } from './admin/shared';
+import Overview from './admin/Overview';
+import Reserve from './admin/Reserve';
+import CashDesk from './admin/CashDesk';
+import Transactions from './admin/Transactions';
+import Approvals from './admin/Approvals';
 
 const TOKEN_KEY = 'nirapod-admin-token'; // separate from the customer session
-const statusVariant = { pending: 'warning', approved: 'success', rejected: 'danger', suspended: 'danger', blocked: 'danger' };
+
+const NAV = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'reserve', label: 'Reserve', icon: Coins },
+  { id: 'cash', label: 'Cash desk', icon: Banknote },
+  { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { id: 'approvals', label: 'Approvals', icon: UserCheck },
+];
 
 export default function Admin({ onBack }) {
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY));
-
-  const logout = () => {
+  const logout = useCallback(() => {
     sessionStorage.removeItem(TOKEN_KEY);
     setToken(null);
-  };
+  }, []);
 
-  return (
-    <div className="min-h-screen bg-slate-100 dark:bg-navy-950 page-enter">
-      <header className="bg-navy-900 text-white px-6 py-5">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center">
-              <Shield className="w-5 h-5" />
-            </div>
-            <div>
-              <h1 className="text-lg font-bold">Nirapod Admin</h1>
-              <p className="text-xs text-slate-400">Approvals & customer management</p>
-            </div>
-          </div>
-          <div className="flex gap-4 text-sm">
-            {token && <button onClick={logout} className="text-slate-300 hover:text-white">Log out</button>}
-            <button onClick={onBack} className="text-slate-300 hover:text-white">← Back to App</button>
-          </div>
-        </div>
-      </header>
-      {token ? (
-        <Panel token={token} onExpired={logout} />
-      ) : (
-        <AdminLogin onToken={(t) => { sessionStorage.setItem(TOKEN_KEY, t); setToken(t); }} />
-      )}
-    </div>
-  );
+  if (!token) {
+    return <AdminLogin onBack={onBack} onToken={(t) => { sessionStorage.setItem(TOKEN_KEY, t); setToken(t); }} />;
+  }
+  return <Shell token={token} onLogout={logout} onBack={onBack} />;
 }
 
-function AdminLogin({ onToken }) {
+function AdminLogin({ onToken, onBack }) {
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -64,213 +56,132 @@ function AdminLogin({ onToken }) {
   };
 
   return (
-    <form onSubmit={submit} className="max-w-sm mx-auto px-6 py-16 space-y-4">
-      <h2 className="text-xl font-semibold text-navy-900 dark:text-white">Admin log in</h2>
-      <div>
-        <label className="label">Email or phone</label>
-        <input className="input-field" value={identifier} onChange={(e) => setIdentifier(e.target.value)} autoComplete="username" />
-      </div>
-      <div>
-        <label className="label">Password</label>
-        <input type="password" className="input-field" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-      </div>
-      {error && <p className="text-sm text-red-600">{error}</p>}
-      <button className="btn-primary w-full" disabled={loading}>
-        {loading ? <LoadingSpinner className="w-5 h-5 mx-auto" /> : 'Log In'}
-      </button>
-    </form>
-  );
-}
-
-const TABS = [
-  { id: 'users', label: 'Customers', icon: Users },
-  { id: 'accounts', label: 'Accounts', icon: Landmark },
-  { id: 'cards', label: 'Cards', icon: CreditCard },
-];
-
-function Panel({ token, onExpired }) {
-  const [tab, setTab] = useState('users');
-  const [filter, setFilter] = useState('pending');
-  const [stats, setStats] = useState(null);
-  const [rows, setRows] = useState(null);
-  const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [dialog, setDialog] = useState(null); // { kind, row, action }
-  const [reason, setReason] = useState('');
-  const [limit, setLimit] = useState('50000');
-
-  const call = useCallback(
-    async (path, opts) => {
-      try {
-        return await api(path, { ...opts, token });
-      } catch (e) {
-        if (e.status === 401) onExpired();
-        throw e;
-      }
-    },
-    [token, onExpired]
-  );
-
-  const load = useCallback(async () => {
-    setError('');
-    setRows(null);
-    try {
-      const q = filter === 'all' ? '' : `?status=${filter}`;
-      const [s, list] = await Promise.all([call('/admin/stats'), call(`/admin/${tab}${q}`)]);
-      setStats(s);
-      setRows(list);
-    } catch (e) {
-      setError(e.message);
-      setRows([]);
-    }
-  }, [call, tab, filter]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const act = async (kind, id, action, body = {}) => {
-    setBusy(true);
-    setError('');
-    try {
-      await call(`/admin/${kind}/${id}/${action}`, { method: 'POST', body });
-      setDialog(null);
-      setReason('');
-      await load();
-    } catch (e) {
-      setError(e.message);
-    }
-    setBusy(false);
-  };
-
-  const open = (kind, row, action) => {
-    // Approvals of users/accounts need no extra input; rejections ask for a reason; credit cards ask for a limit.
-    const needsInput = action === 'reject' || action === 'suspend' || action === 'block' || (kind === 'cards' && action === 'approve' && row.cardType === 'credit');
-    if (needsInput) setDialog({ kind, row, action });
-    else act(kind, row.id, action);
-  };
-
-  return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
-      {stats && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <Stat icon={Users} label="Pending customers" value={stats.pendingUsers} />
-          <Stat icon={Landmark} label="Pending accounts" value={stats.pendingAccounts} />
-          <Stat icon={CreditCard} label="Pending cards" value={stats.pendingCards} />
-          <Stat icon={Wallet} label="Total balances" value={formatBDT(stats.totalBalance)} />
+    <div className="min-h-screen grid lg:grid-cols-2 bg-slate-50 dark:bg-navy-950 page-enter">
+      <div className="hidden lg:flex flex-col justify-between bg-gradient-to-br from-navy-900 via-navy-800 to-emerald-900 text-white p-12">
+        <div className="flex items-center gap-3">
+          <div className="w-11 h-11 rounded-xl bg-emerald-500 flex items-center justify-center"><Shield className="w-6 h-6" /></div>
+          <span className="text-xl font-bold">Nirapod Admin</span>
         </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium ${
-              tab === t.id ? 'bg-navy-900 text-white dark:bg-emerald-600' : 'bg-white dark:bg-navy-800 text-slate-600 dark:text-slate-300'
-            }`}
-          >
-            <t.icon className="w-4 h-4" /> {t.label}
-          </button>
-        ))}
-        <select value={filter} onChange={(e) => setFilter(e.target.value)} className="input-field py-2 text-sm w-auto ml-auto">
-          <option value="pending">Pending</option>
-          <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
-          <option value="all">All</option>
-        </select>
-        <button onClick={load} className="p-2 rounded-xl bg-white dark:bg-navy-800" aria-label="Refresh">
-          <RefreshCw className="w-4 h-4 text-slate-500" />
-        </button>
+        <div>
+          <h1 className="text-4xl font-bold leading-tight">Run the bank.<br />Keep every taka accounted for.</h1>
+          <p className="text-slate-300 mt-4 max-w-md">Manage the reserve, receive customer cash, approve accounts and cards, and watch every transaction in one place.</p>
+        </div>
+        <p className="text-xs text-slate-400">Authorized staff only. All actions are logged.</p>
       </div>
-
-      {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
-
-      <div className="card divide-y divide-slate-100 dark:divide-navy-800">
-        {rows === null && <div className="py-10 flex justify-center"><LoadingSpinner /></div>}
-        {rows?.length === 0 && <p className="px-5 py-10 text-center text-sm text-slate-400">Nothing here</p>}
-        {rows?.map((r) => (
-          <Row key={r.id} tab={tab} r={r} onAction={(action) => open(tab, r, action)} busy={busy} />
-        ))}
-      </div>
-
-      <Modal
-        open={!!dialog}
-        onClose={() => setDialog(null)}
-        title={dialog ? `${dialog.action[0].toUpperCase()}${dialog.action.slice(1)}` : ''}
-        size="sm"
-      >
-        {dialog && (
-          <div className="space-y-4">
-            {dialog.kind === 'cards' && dialog.action === 'approve' ? (
-              <div>
-                <label className="label">Credit limit (৳)</label>
-                <input type="number" min="1" className="input-field" value={limit} onChange={(e) => setLimit(e.target.value)} />
-              </div>
-            ) : (
-              <div>
-                <label className="label">Reason (optional)</label>
-                <input className="input-field" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} />
-              </div>
-            )}
-            <button
-              disabled={busy}
-              className="btn-primary w-full"
-              onClick={() =>
-                act(dialog.kind, dialog.row.id, dialog.action,
-                  dialog.kind === 'cards' && dialog.action === 'approve' ? { creditLimit: Number(limit) } : { reason })
-              }
-            >
-              Confirm
-            </button>
+      <div className="flex items-center justify-center p-6">
+        <form onSubmit={submit} className="w-full max-w-sm space-y-5">
+          <div className="lg:hidden flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-xl bg-navy-900 text-white flex items-center justify-center"><Shield className="w-5 h-5" /></div>
+            <span className="font-bold text-navy-900 dark:text-white">Nirapod Admin</span>
           </div>
-        )}
-      </Modal>
-    </div>
-  );
-}
-
-function Row({ tab, r, onAction, busy }) {
-  const title =
-    tab === 'users' ? r.name
-    : tab === 'accounts' ? `${r.customer} · ${r.accountType} account`
-    : `${r.customer} · ${r.network} ${r.cardType}`;
-  const sub =
-    tab === 'users' ? `${r.phone} · ${r.email}`
-    : tab === 'accounts' ? `${r.phone}${r.accountNumber ? ` · ${r.accountNumber}` : ''}`
-    : `${r.phone}${r.numberMasked ? ` · ${r.numberMasked}` : ''}${r.creditLimit ? ` · limit ${formatBDT(r.creditLimit)}` : ''}`;
-
-  const actions = [];
-  if (r.status === 'pending') actions.push(['approve', 'btn-accent'], ['reject', 'btn-secondary']);
-  if (tab === 'users' && r.status === 'approved') actions.push(['suspend', 'btn-secondary']);
-  if (tab === 'users' && (r.status === 'suspended' || r.status === 'rejected')) actions.push(['approve', 'btn-accent']);
-  if (tab === 'cards' && r.status === 'approved') actions.push(['block', 'btn-secondary']);
-
-  return (
-    <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
-      <div className="flex-1 min-w-0">
-        <p className="font-medium text-navy-900 dark:text-white truncate">{title}</p>
-        <p className="text-xs text-slate-500 truncate">{sub}</p>
-        {r.reason && <p className="text-xs text-slate-400 mt-0.5">Reason: {r.reason}</p>}
-      </div>
-      <Badge variant={statusVariant[r.status] || 'default'}>{r.status}</Badge>
-      <div className="flex gap-2">
-        {actions.map(([a, cls]) => (
-          <button key={a} disabled={busy} onClick={() => onAction(a)} className={`${cls} !py-1.5 !px-3 text-sm capitalize`}>
-            {a}
+          <div>
+            <h2 className="text-2xl font-bold text-navy-900 dark:text-white">Admin sign in</h2>
+            <p className="text-sm text-slate-500 mt-1">Use your staff email and password.</p>
+          </div>
+          <div>
+            <label className="label">Email or phone</label>
+            <input className="input-field" value={identifier} onChange={(e) => setIdentifier(e.target.value)} autoComplete="username" />
+          </div>
+          <div>
+            <label className="label">Password</label>
+            <div className="relative">
+              <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input type="password" className="input-field pl-10" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </div>
+          </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <button className="btn-primary w-full" disabled={loading || !identifier || !password}>
+            {loading ? <LoadingSpinner className="w-5 h-5 mx-auto text-white" /> : 'Sign in'}
           </button>
-        ))}
+          <button type="button" onClick={onBack} className="w-full text-sm text-slate-500 hover:text-navy-900 dark:hover:text-white flex items-center justify-center gap-1.5">
+            <ArrowLeft className="w-4 h-4" /> Back to app
+          </button>
+        </form>
       </div>
     </div>
   );
 }
 
-function Stat({ icon: Icon, label, value }) {
+function Shell({ token, onLogout, onBack }) {
+  const { theme, setTheme } = useApp();
+  const [tab, setTab] = useState('overview');
+  const [stats, setStats] = useState(null);
+  const call = useAdminCall(token, onLogout);
+
+  const reloadStats = useCallback(async () => {
+    try { setStats(await call('/admin/stats')); } catch { /* shown by the page that needs it */ }
+  }, [call]);
+
+  useEffect(() => {
+    reloadStats();
+    const id = setInterval(() => document.visibilityState === 'visible' && reloadStats(), 30000);
+    return () => clearInterval(id);
+  }, [reloadStats]);
+
+  const pending = stats ? stats.pendingUsers + stats.pendingAccounts + stats.pendingCards : 0;
+  const go = (id) => { setTab(id); window.scrollTo(0, 0); };
+
+  const NavButton = ({ item, mobile }) => {
+    const active = tab === item.id;
+    return (
+      <button
+        onClick={() => go(item.id)}
+        className={mobile
+          ? `flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-medium whitespace-nowrap ${active ? 'bg-white text-navy-900' : 'text-slate-300 bg-white/10'}`
+          : `w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors ${active ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'}`}
+      >
+        <item.icon className="w-[18px] h-[18px]" />
+        {item.label}
+        {item.id === 'approvals' && pending > 0 && (
+          <span className="ml-auto min-w-5 h-5 px-1.5 rounded-full bg-amber-500 text-white text-[11px] flex items-center justify-center">{pending}</span>
+        )}
+      </button>
+    );
+  };
+
   return (
-    <div className="card p-4">
-      <div className="flex items-center gap-2 mb-2 text-slate-500">
-        <Icon className="w-4 h-4" />
-        <p className="text-xs font-medium uppercase tracking-wide">{label}</p>
+    <div className="min-h-screen bg-slate-100 dark:bg-navy-950 lg:flex page-enter">
+      {/* Desktop sidebar */}
+      <aside className="hidden lg:flex lg:flex-col w-64 shrink-0 bg-navy-900 text-white p-5 sticky top-0 h-screen">
+        <div className="flex items-center gap-3 mb-8 px-1">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500 flex items-center justify-center"><Shield className="w-5 h-5" /></div>
+          <div><p className="font-bold leading-tight">Nirapod</p><p className="text-xs text-slate-400">Admin console</p></div>
+        </div>
+        <nav className="space-y-1 flex-1">{NAV.map((n) => <NavButton key={n.id} item={n} />)}</nav>
+        <div className="space-y-1 pt-4 border-t border-white/10 text-sm">
+          <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/5">
+            {theme === 'dark' ? <Sun className="w-[18px] h-[18px]" /> : <Moon className="w-[18px] h-[18px]" />} {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          </button>
+          <button onClick={onBack} className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/5"><ArrowLeft className="w-[18px] h-[18px]" /> Customer app</button>
+          <button onClick={onLogout} className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/5"><LogOut className="w-[18px] h-[18px]" /> Log out</button>
+        </div>
+      </aside>
+
+      <div className="flex-1 min-w-0">
+        {/* Mobile header */}
+        <header className="lg:hidden bg-navy-900 text-white px-4 pt-4 pb-3 sticky top-0 z-30">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center"><Shield className="w-4 h-4" /></div>
+              <span className="font-bold">Nirapod Admin</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="p-2 text-slate-300" aria-label="Toggle theme">{theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}</button>
+              <button onClick={onBack} className="p-2 text-slate-300" aria-label="Back to app"><ArrowLeft className="w-5 h-5" /></button>
+              <button onClick={onLogout} className="p-2 text-slate-300" aria-label="Log out"><LogOut className="w-5 h-5" /></button>
+            </div>
+          </div>
+          <div className="flex gap-2 overflow-x-auto no-scrollbar -mx-4 px-4">{NAV.map((n) => <NavButton key={n.id} item={n} mobile />)}</div>
+        </header>
+
+        <main className="max-w-5xl mx-auto px-4 sm:px-8 py-6 lg:py-8 pb-16">
+          {tab === 'overview' && <Overview stats={stats} go={go} />}
+          {tab === 'reserve' && <Reserve call={call} reloadStats={reloadStats} go={go} />}
+          {tab === 'cash' && <CashDesk call={call} stats={stats} reloadStats={reloadStats} />}
+          {tab === 'transactions' && <Transactions call={call} />}
+          {tab === 'approvals' && <Approvals call={call} stats={stats} reloadStats={reloadStats} />}
+        </main>
       </div>
-      <p className="text-2xl font-bold text-navy-900 dark:text-white">{value}</p>
     </div>
   );
 }

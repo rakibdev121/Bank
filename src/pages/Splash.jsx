@@ -17,7 +17,7 @@ export default function Splash() {
         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" style={{ animationDelay: '150ms' }} />
         <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" style={{ animationDelay: '300ms' }} />
       </div>
-      <p className="absolute bottom-10 text-xs text-slate-500">Demo • Learning Prototype</p>
+      <p className="absolute bottom-10 text-xs text-slate-500">Secure digital banking</p>
     </div>
   );
 }

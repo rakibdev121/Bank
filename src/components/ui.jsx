@@ -111,13 +111,3 @@ export function EmptyState({ icon: Icon, title, description, action }) {
 export function LoadingSpinner({ className = 'w-6 h-6' }) {
   return <Loader2 className={`animate-spin text-emerald-600 ${className}`} />;
 }
-
-export function DemoBanner() {
-  return (
-    <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200/60 dark:border-amber-800/40 px-4 py-2 text-center">
-      <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-        DEMO / LEARNING PROTOTYPE — Virtual money only. No real transactions.
-      </p>
-    </div>
-  );
-}

@@ -4,7 +4,7 @@ import {
   ChevronRight, Lock, Smartphone, Eye, EyeOff
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { Avatar, ConfirmDialog, DemoBanner, Modal } from '../components/ui';
+import { Avatar, ConfirmDialog, Modal } from '../components/ui';
 import { api } from '../api';
 
 export default function Profile({ onNavigate }) {
@@ -62,7 +62,6 @@ export default function Profile({ onNavigate }) {
           <InfoRow label="Account Number" value={user.accountNumber} />
           <InfoRow label="Member Since" value={user.memberSince} />
           <InfoRow label="KYC Status" value={user.kycStatus} />
-          <p className="text-xs text-amber-600 pt-2">Demo account — data is fictional.</p>
         </div>
       </SubScreen>
     );
@@ -77,17 +76,17 @@ export default function Profile({ onNavigate }) {
               <Smartphone className="w-5 h-5 text-slate-500" />
               <div>
                 <p className="text-sm font-medium">Two-Factor Authentication</p>
-                <p className="text-xs text-slate-500">Demo only</p>
+                <p className="text-xs text-slate-500">Coming soon</p>
               </div>
             </div>
-            <span className="text-xs font-medium text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30 px-2 py-1 rounded-full">On</span>
+            <span className="text-xs text-slate-400">—</span>
           </div>
           <div className="card p-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Lock className="w-5 h-5 text-slate-500" />
               <div>
                 <p className="text-sm font-medium">Biometric Login</p>
-                <p className="text-xs text-slate-500">Not available in demo</p>
+                <p className="text-xs text-slate-500">Coming soon</p>
               </div>
             </div>
             <span className="text-xs text-slate-400">—</span>
@@ -157,14 +156,14 @@ export default function Profile({ onNavigate }) {
       <SubScreen title="Help & Support" onBack={() => setScreen(null)}>
         <div className="space-y-3 text-sm">
           <div className="card p-4">
-            <p className="font-medium mb-1">About this demo</p>
+            <p className="font-medium mb-1">About Nirapod Bank</p>
             <p className="text-slate-500">
-              Nirapod Bank is a learning prototype. All balances, transfers and savings use virtual money. No real banking operations occur.
+              Deposit cash at a Nirapod counter to add money to your account. You can then send money to other customers, save towards goals and manage your cards from the app.
             </p>
           </div>
           <div className="card p-4">
-            <p className="font-medium mb-1">Contact (demo)</p>
-            <p className="text-slate-500">support@nirapod.demo</p>
+            <p className="font-medium mb-1">Contact</p>
+            <p className="text-slate-500">support@nirapod.bank</p>
             <p className="text-slate-500">+880 9600-000000</p>
           </div>
         </div>
@@ -174,7 +173,6 @@ export default function Profile({ onNavigate }) {
 
   return (
     <div className="pb-24 page-enter">
-      <DemoBanner />
       <header className="px-5 pt-6 pb-6">
         <div className="flex items-center gap-4">
           <Avatar name={user.name} size="xl" />
@@ -219,7 +217,7 @@ export default function Profile({ onNavigate }) {
         onClose={() => setShowLogout(false)}
         onConfirm={logout}
         title="Log Out"
-        message="Are you sure you want to log out of the demo account?"
+        message="Are you sure you want to log out?"
         confirmLabel="Log Out"
         danger
       />

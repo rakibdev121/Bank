@@ -1,49 +1,63 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { generateRef } from '../data/mockData';
 import { api, getToken, setToken } from '../api';
 
 const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
-  const [profile, setProfile] = useState(null); // { user, accounts, cards } from the server
-  const [balance, setBalance] = useState(0);
+  const [profile, setProfile] = useState(null); // { user, accounts, cards, config } from the server
   const [transactions, setTransactions] = useState([]);
   const [savings, setSavings] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [hideBalance, setHideBalance] = useState(false);
-    const [theme, setTheme] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('nirapod-theme') || 'light';
-    }
+  const [theme, setTheme] = useState(() => {
+    if (typeof window !== 'undefined') return localStorage.getItem('nirapod-theme') || 'light';
     return 'light';
   });
   const [isLoading, setIsLoading] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
 
-  const applyProfile = useCallback((data) => {
-    setProfile(data);
-    const acc = data.accounts.find((a) => a.status === 'approved');
-    // Server balance + any local demo top-ups made this session are not persisted yet.
-    setBalance(acc ? acc.balance : 0);
+  const loadMoney = useCallback(async () => {
+    const [t, s, n] = await Promise.all([
+      api('/transactions').catch(() => []),
+      api('/savings').catch(() => []),
+      api('/notifications').catch(() => []),
+    ]);
+    setTransactions(t);
+    setSavings(s);
+    setNotifications(n);
   }, []);
 
-  const refreshProfile = useCallback(async () => {
+  const applyProfile = useCallback((data) => setProfile(data), []);
+
+  // Reload everything that can change after a money movement
+  const refreshAll = useCallback(async () => {
     const data = await api('/me');
     applyProfile(data);
+    await loadMoney();
     return data;
-  }, [applyProfile]);
+  }, [applyProfile, loadMoney]);
+
+  const refreshProfile = refreshAll;
 
   useEffect(() => {
-    // Splash, and restore the session if a valid token exists
-    const minSplash = new Promise((r) => setTimeout(r, 1500));
+    const minSplash = new Promise((r) => setTimeout(r, 1200));
     const restore = getToken()
-      ? api('/me').then(applyProfile).catch(() => setToken(null))
+      ? api('/me').then(async (d) => { applyProfile(d); await loadMoney(); }).catch(() => setToken(null))
       : Promise.resolve();
     Promise.all([minSplash, restore]).then(() => {
       setShowSplash(false);
       setIsLoading(false);
     });
-  }, [applyProfile]);
+  }, [applyProfile, loadMoney]);
+
+  // Pick up money that arrives while the app is open (cash deposit at the counter, incoming transfers)
+  useEffect(() => {
+    if (!profile) return undefined;
+    const tick = () => { if (document.visibilityState === 'visible') refreshAll().catch(() => {}); };
+    const id = setInterval(tick, 20000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', tick); };
+  }, [profile?.user?.id, refreshAll]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -59,173 +73,78 @@ export function AppProvider({ children }) {
       setToken(token);
       const data = await api('/me');
       applyProfile(data);
+      await loadMoney();
       return { success: true, role: user.role };
     } catch (e) {
       setToken(null);
       return { success: false, error: e.message, code: e.code };
     }
-  }, [applyProfile]);
+  }, [applyProfile, loadMoney]);
 
   const logout = useCallback(() => {
     setToken(null);
     setProfile(null);
-    setBalance(0);
     setTransactions([]);
     setSavings([]);
     setNotifications([]);
   }, []);
 
-  const toggleHideBalance = useCallback(() => {
-    setHideBalance((v) => !v);
-  }, []);
+  const toggleHideBalance = useCallback(() => setHideBalance((v) => !v), []);
 
-  const addDemoMoney = useCallback((amount = 5000) => {
-    setBalance((b) => b + amount);
-    const txn = {
-      id: `txn_${Date.now()}`,
-      type: 'received',
-      title: 'Demo Top-up',
-      counterparty: 'Nirapod Demo',
-      amount,
-      fee: 0,
-      date: new Date().toISOString(),
-      status: 'completed',
-      category: 'income',
-      reference: generateRef(),
-      note: 'Virtual money added for testing',
-    };
-    setTransactions((prev) => [txn, ...prev]);
-    addNotification({
-      type: 'transaction',
-      title: 'Demo Money Added',
-      body: `৳${amount.toLocaleString()} credited to your demo account`,
-    });
-  }, []);
+  const account = profile?.accounts.find((a) => a.status === 'approved') || null;
+  const balance = account ? account.balance : 0;
+  const fee = profile?.config?.transferFee ?? 10;
 
-  const sendMoney = useCallback(({ recipient, amount, note, fee = 10 }) => {
-    const total = amount + fee;
-    if (total > balance) {
-      return { success: false, error: 'Insufficient demo balance' };
+  const sendMoney = useCallback(async ({ to, amount, note, requestId }) => {
+    try {
+      const res = await api('/transfer', { method: 'POST', body: { to, amount, note, requestId } });
+      await refreshAll();
+      return { success: true, transaction: res.transaction };
+    } catch (e) {
+      return { success: false, error: e.message };
     }
-    setBalance((b) => b - total);
-    const txn = {
-      id: `txn_${Date.now()}`,
-      type: 'sent',
-      title: 'Send Money',
-      counterparty: recipient.name || recipient.phone || 'Recipient',
-      amount,
-      fee,
-      date: new Date().toISOString(),
-      status: 'completed',
-      category: 'transfer',
-      reference: generateRef(),
-      note: note || '',
-    };
-    setTransactions((prev) => [txn, ...prev]);
-    addNotification({
-      type: 'transaction',
-      title: 'Transfer Successful',
-      body: `৳${amount.toLocaleString()} sent to ${txn.counterparty}`,
-    });
-    return { success: true, transaction: txn };
-  }, [balance]);
-
-  const addNotification = useCallback((n) => {
-    setNotifications((prev) => [
-      {
-        id: `n_${Date.now()}`,
-        time: new Date().toISOString(),
-        read: false,
-        ...n,
-      },
-      ...prev,
-    ]);
-  }, []);
+  }, [refreshAll]);
 
   const markNotificationRead = useCallback((id) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-    );
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    api('/notifications/read', { method: 'POST', body: { id } }).catch(() => {});
   }, []);
 
   const markAllNotificationsRead = useCallback(() => {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    api('/notifications/read', { method: 'POST', body: {} }).catch(() => {});
   }, []);
 
-  const createSavingsGoal = useCallback((goal) => {
-    const newGoal = {
-      id: `sav_${Date.now()}`,
-      saved: 0,
-      color: 'emerald',
-      ...goal,
-    };
-    setSavings((prev) => [newGoal, ...prev]);
-  }, []);
+  const createSavingsGoal = useCallback(async (goal) => {
+    try {
+      await api('/savings', { method: 'POST', body: goal });
+      await refreshAll();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }, [refreshAll]);
 
-  const contributeToSavings = useCallback((goalId, amount) => {
-    if (amount > balance) return { success: false, error: 'Insufficient balance' };
-    setBalance((b) => b - amount);
-    setSavings((prev) =>
-      prev.map((g) =>
-        g.id === goalId ? { ...g, saved: Math.min(g.saved + amount, g.target) } : g
-      )
-    );
-    const goal = savings.find((g) => g.id === goalId);
-    const txn = {
-      id: `txn_${Date.now()}`,
-      type: 'sent',
-      title: 'Savings Contribution',
-      counterparty: goal?.name || 'Savings',
-      amount,
-      fee: 0,
-      date: new Date().toISOString(),
-      status: 'completed',
-      category: 'savings',
-      reference: generateRef(),
-      note: '',
-    };
-    setTransactions((prev) => [txn, ...prev]);
-    return { success: true };
-  }, [balance, savings]);
+  const moveSavings = useCallback(async (goalId, action, amount) => {
+    try {
+      await api(`/savings/${goalId}/${action}`, { method: 'POST', body: { amount } });
+      await refreshAll();
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }, [refreshAll]);
 
   const isAuthenticated = !!profile;
-  const account = profile?.accounts.find((a) => a.status === 'approved') || null;
   const user = profile
-    ? {
-        ...profile.user,
-        accountNumber: account?.accountNumber || 'No account yet',
-        kycStatus: 'Approved by admin',
-      }
+    ? { ...profile.user, accountNumber: account?.accountNumber || 'No account yet', kycStatus: 'Approved by bank' }
     : null;
-  const accounts = profile?.accounts || [];
-  const cards = profile?.cards || [];
 
   const value = {
-    user,
-    balance,
-    transactions,
-    savings,
-    notifications,
-    hideBalance,
-    isAuthenticated,
-    profile,
-    accounts,
-    cards,
-    refreshProfile,
-    theme,
-    isLoading,
-    showSplash,
-    login,
-    logout,
-    toggleHideBalance,
-    addDemoMoney,
-    sendMoney,
-    addNotification,
-    markNotificationRead,
-    markAllNotificationsRead,
-    createSavingsGoal,
-    contributeToSavings,
-    setTheme,
+    user, balance, account, fee, transactions, savings, notifications, hideBalance, isAuthenticated, profile,
+    accounts: profile?.accounts || [], cards: profile?.cards || [],
+    refreshProfile, refreshAll, theme, isLoading, showSplash, login, logout, toggleHideBalance,
+    sendMoney, markNotificationRead, markAllNotificationsRead, createSavingsGoal, moveSavings, setTheme,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

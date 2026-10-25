@@ -103,12 +103,6 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <button
-          onClick={() => setShowAdmin(true)}
-          className="absolute bottom-6 left-6 right-6 text-xs text-slate-500 hover:text-slate-300"
-        >
-          Admin Demo →
-        </button>
       </div>
 
       <div className="lg:ml-56">

@@ -17,7 +17,8 @@ import sqlite3
 import ssl
 import time
 from urllib.parse import unquote, urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from functools import wraps
 
 from flask import Flask, g, jsonify, request, send_from_directory
@@ -101,13 +102,53 @@ CREATE TABLE IF NOT EXISTS audit (
   target TEXT NOT NULL,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reserve (
+  id INTEGER PRIMARY KEY,
+  balance_paisa BIGINT NOT NULL DEFAULT 0,
+  fees_paisa BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  reference TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,                       -- cash_in | cash_out | transfer | savings_in | savings_out | reserve_add | reserve_remove
+  from_account_id INTEGER REFERENCES accounts(id),
+  to_account_id INTEGER REFERENCES accounts(id),
+  amount_paisa BIGINT NOT NULL,
+  fee_paisa BIGINT NOT NULL DEFAULT 0,
+  note TEXT,
+  admin_id INTEGER,
+  idem_key TEXT UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS savings_goals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  target_paisa BIGINT NOT NULL,
+  saved_paisa BIGINT NOT NULL DEFAULT 0,
+  deadline TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS txn_from_idx ON transactions(from_account_id);
+CREATE INDEX IF NOT EXISTS txn_to_idx ON transactions(to_account_id);
+CREATE INDEX IF NOT EXISTS txn_created_idx ON transactions(created_at);
+CREATE INDEX IF NOT EXISTS notif_user_idx ON notifications(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_account ON accounts(user_id) WHERE status IN ('pending','approved');
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_card ON cards(user_id, network, card_type) WHERE status IN ('pending','approved');
 """
 
 # Supabase exposes public tables through its REST API. RLS on + no policies = that API
 # cannot read these tables; this server connects directly and is not affected.
-RLS = [f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY" for t in ("users", "accounts", "cards", "audit")]
+RLS = [f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY" for t in ("users", "accounts", "cards", "audit", "reserve", "transactions", "savings_goals", "notifications")]
 
 
 class Row(dict):
@@ -124,6 +165,10 @@ class Cursor:
     def _rows(self, raw):
         names = [c[0] for c in self.cur.description]
         return [Row(zip(names, r)) for r in raw]
+
+    @property
+    def rowcount(self):
+        return self.cur.rowcount
 
     def fetchone(self):
         raw = self.cur.fetchone()
@@ -204,6 +249,9 @@ def init_db():
     for stmt in [x.strip() for x in schema.split(";") if x.strip()] + (RLS if USE_PG else []):
         db.execute(stmt)
     db.commit()
+    if not db.execute("SELECT 1 FROM reserve WHERE id=1").fetchone():
+        db.execute("INSERT INTO reserve (id, balance_paisa, fees_paisa) VALUES (1, 0, 0)")
+        db.commit()
     has_admin = db.execute("SELECT 1 FROM users WHERE role='admin'").fetchone()
     if not has_admin:
         email = os.environ.get("ADMIN_EMAIL", "admin@nirapod.local").lower()
@@ -442,6 +490,7 @@ def me():
         "user": public_user(g.user),
         "accounts": [public_account(a) for a in accounts],
         "cards": [public_card(c) for c in cards],
+        "config": {"transferFee": taka(TRANSFER_FEE_PAISA), "maxTransfer": taka(MAX_TRANSFER_PAISA)},
     })
 
 
@@ -533,20 +582,6 @@ def reveal_card(card_id):
 def audit(action, target):
     get_db().execute("INSERT INTO audit (admin_id, action, target, at) VALUES (?,?,?,?)",
                      (g.user["id"], action, target, now()))
-
-
-@app.get("/api/admin/stats")
-@auth_required(("admin",))
-def admin_stats():
-    db = get_db()
-    q = lambda sql: int(db.execute(sql).fetchone()[0])
-    return jsonify({
-        "pendingUsers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='pending'"),
-        "customers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='approved'"),
-        "pendingAccounts": q("SELECT COUNT(*) FROM accounts WHERE status='pending'"),
-        "pendingCards": q("SELECT COUNT(*) FROM cards WHERE status='pending'"),
-        "totalBalance": q("SELECT COALESCE(SUM(balance_paisa),0) FROM accounts WHERE status='approved'") / 100,
-    })
 
 
 @app.get("/api/admin/users")
@@ -669,6 +704,456 @@ def admin_card_action(cid, action):
     audit(f"card.{action}", f"card:{cid}")
     db.commit()
     return jsonify({"ok": True})
+
+
+# ======================================================= money: ledger core
+TRANSFER_FEE_PAISA = int(float(os.environ.get("TRANSFER_FEE", "10")) * 100)  # flat fee per transfer (BDT)
+MAX_TRANSFER_PAISA = int(float(os.environ.get("MAX_TRANSFER", "500000")) * 100)
+MAX_CASH_PAISA = int(float(os.environ.get("MAX_CASH_OP", "10000000")) * 100)
+MAX_RESERVE_OP_PAISA = 10**14  # BDT 1 trillion per reserve operation
+
+
+class TxnError(Exception):
+    def __init__(self, msg, status=400, code=None):
+        super().__init__(msg)
+        self.msg, self.status, self.code = msg, status, code
+
+
+def to_paisa(value, cap):
+    """Parse a BDT amount (max 2 decimals, > 0, <= cap) into integer paisa, or None."""
+    try:
+        d = Decimal(str(value).strip())
+        if not d.is_finite() or d <= 0 or d != d.quantize(Decimal("0.01")):
+            return None
+        p = int(d * 100)
+    except Exception:
+        return None
+    return p if 0 < p <= cap else None
+
+
+def taka(paisa):
+    return int(paisa or 0) / 100
+
+
+def new_ref():
+    return "NIR-TXN-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + secrets.token_hex(4).upper()
+
+
+def apply_money(db, deltas=(), reserve=0, fee=0):
+    """Move money atomically (caller commits). deltas: [(account_id, +/-paisa)].
+    Accounts are locked in id order (no deadlocks); debits and the reserve can never go negative."""
+    for acc_id, delta in sorted(deltas):
+        if delta < 0:
+            c = db.execute(
+                "UPDATE accounts SET balance_paisa=balance_paisa-? WHERE id=? AND status='approved' AND balance_paisa>=?",
+                (-delta, acc_id, -delta))
+            if c.rowcount != 1:
+                raise TxnError("Insufficient balance", 409, "insufficient")
+        elif delta > 0:
+            c = db.execute("UPDATE accounts SET balance_paisa=balance_paisa+? WHERE id=? AND status='approved'",
+                           (delta, acc_id))
+            if c.rowcount != 1:
+                raise TxnError("Account is not active", 409, "inactive")
+    if reserve or fee:
+        c = db.execute(
+            "UPDATE reserve SET balance_paisa=balance_paisa+?, fees_paisa=fees_paisa+? WHERE id=1 AND balance_paisa+? >= 0",
+            (reserve, fee, reserve))
+        if c.rowcount != 1:
+            raise TxnError("Reserve balance is not enough for this operation", 409, "reserve_low")
+
+
+def log_txn(db, kind, amount, from_acc=None, to_acc=None, fee=0, note=None, admin_id=None, idem=None):
+    ref = new_ref()
+    db.execute(
+        "INSERT INTO transactions (reference, kind, from_account_id, to_account_id, amount_paisa, fee_paisa,"
+        " note, admin_id, idem_key, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (ref, kind, from_acc, to_acc, amount, fee, note, admin_id, idem, now()))
+    return db.execute(TXN_SELECT + " WHERE t.reference=?", (ref,)).fetchone()
+
+
+def notify(db, user_id, ntype, title, text):
+    db.execute("INSERT INTO notifications (user_id, type, title, body, created_at) VALUES (?,?,?,?,?)",
+               (user_id, ntype, title, text, now()))
+
+
+def bdt(paisa):
+    return f"৳{paisa / 100:,.2f}"
+
+
+def guarded(fn):
+    """Run a money operation: commit on success, roll back + clean error on TxnError."""
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        db = get_db()
+        try:
+            res = fn(*a, **kw)
+            db.commit()
+            return res
+        except TxnError as e:
+            db.rollback()
+            return err(e.msg, e.status, e.code)
+        except Exception:
+            db.rollback()
+            raise
+    return wrapper
+
+
+TXN_SELECT = """SELECT t.*,
+  fa.user_id AS from_uid, fu.name AS from_name, fu.phone AS from_phone, fa.account_number AS from_acc_no,
+  ta.user_id AS to_uid, tu.name AS to_name, tu.phone AS to_phone, ta.account_number AS to_acc_no,
+  au.name AS admin_name
+FROM transactions t
+LEFT JOIN accounts fa ON fa.id=t.from_account_id LEFT JOIN users fu ON fu.id=fa.user_id
+LEFT JOIN accounts ta ON ta.id=t.to_account_id LEFT JOIN users tu ON tu.id=ta.user_id
+LEFT JOIN users au ON au.id=t.admin_id"""
+
+KIND_TITLES = {
+    "cash_in": "Cash Deposit", "cash_out": "Cash Withdrawal", "transfer": "Send Money",
+    "savings_in": "Savings Contribution", "savings_out": "Savings Withdrawal",
+    "reserve_add": "Reserve Added", "reserve_remove": "Reserve Removed",
+}
+
+
+def customer_txn(t, acc_id):
+    out = t["from_account_id"] == acc_id
+    kind = t["kind"]
+    title, party, phone, category = KIND_TITLES.get(kind, kind), "Nirapod Bank", None, kind
+    if kind in ("cash_in", "cash_out"):
+        party, category = "Nirapod Bank · Cash counter", "deposit" if kind == "cash_in" else "withdrawal"
+    elif kind == "transfer":
+        category = "transfer"
+        title, party, phone = ("Send Money", t["to_name"], t["to_phone"]) if out else ("Money Received", t["from_name"], t["from_phone"])
+    elif kind in ("savings_in", "savings_out"):
+        party, category = t["note"] or "Savings goal", "savings"
+    return {
+        "id": t["id"], "reference": t["reference"], "type": "sent" if out else "received",
+        "kind": kind, "title": title, "counterparty": party, "counterpartyPhone": phone,
+        "amount": taka(t["amount_paisa"]), "fee": taka(t["fee_paisa"]) if out else 0,
+        "date": t["created_at"], "status": "completed", "category": category,
+        "note": t["note"] if kind == "transfer" else "",
+    }
+
+
+def admin_txn(t):
+    return {
+        "id": t["id"], "reference": t["reference"], "kind": t["kind"], "title": KIND_TITLES.get(t["kind"], t["kind"]),
+        "amount": taka(t["amount_paisa"]), "fee": taka(t["fee_paisa"]), "note": t["note"],
+        "from": t["from_name"], "fromAccount": t["from_acc_no"], "to": t["to_name"], "toAccount": t["to_acc_no"],
+        "admin": t["admin_name"], "date": t["created_at"],
+    }
+
+
+def my_account(db, user_id):
+    return db.execute("SELECT * FROM accounts WHERE user_id=? AND status='approved'", (user_id,)).fetchone()
+
+
+def mask_name(name):
+    parts = name.split()
+    return " ".join([parts[0]] + [p[0] + "***" for p in parts[1:]]) if parts else name
+
+
+def find_active_account(db, q):
+    """Find an approved account of an approved customer by phone, account number or email."""
+    q = (q or "").strip()
+    if not q:
+        return None
+    phone = normalize_phone(q)
+    return db.execute(
+        "SELECT a.*, u.name AS name, u.phone AS phone, u.email AS email FROM accounts a JOIN users u ON u.id=a.user_id"
+        " WHERE a.status='approved' AND u.status='approved' AND u.role='customer'"
+        " AND (a.account_number=? OR u.phone=? OR u.email=?)",
+        (q.upper(), phone or "-", q.lower())).fetchone()
+
+
+# ------------------------------------------------------- customer: money APIs
+@app.get("/api/config")
+def public_config():
+    return jsonify({"transferFee": taka(TRANSFER_FEE_PAISA), "maxTransfer": taka(MAX_TRANSFER_PAISA)})
+
+
+@app.get("/api/transactions")
+@auth_required(("customer",))
+def my_transactions():
+    db = get_db()
+    acc = my_account(db, g.user["id"])
+    if not acc:
+        return jsonify([])
+    rows = db.execute(TXN_SELECT + " WHERE t.from_account_id=? OR t.to_account_id=? ORDER BY t.id DESC LIMIT 200",
+                      (acc["id"], acc["id"])).fetchall()
+    return jsonify([customer_txn(r, acc["id"]) for r in rows])
+
+
+@app.get("/api/recipients/lookup")
+@auth_required(("customer",))
+def lookup_recipient():
+    db = get_db()
+    rec = find_active_account(db, request.args.get("q"))
+    if not rec or rec["user_id"] == g.user["id"]:
+        return err("No active account found for this phone / account number", 404)
+    return jsonify({"name": mask_name(rec["name"]), "phone": rec["phone"], "accountNumber": rec["account_number"]})
+
+
+@app.post("/api/transfer")
+@auth_required(("customer",))
+@guarded
+def transfer():
+    d = body()
+    db = get_db()
+    amount = to_paisa(d.get("amount"), MAX_TRANSFER_PAISA)
+    if not amount:
+        return err(f"Enter an amount between ৳1 and {bdt(MAX_TRANSFER_PAISA)} (max 2 decimals)")
+    note = (d.get("note") or "").strip()[:80] or None
+    idem = f"{g.user['id']}:{str(d.get('requestId') or '')[:64]}" if d.get("requestId") else None
+    if idem:
+        dup = db.execute(TXN_SELECT + " WHERE t.idem_key=?", (idem,)).fetchone()
+        if dup:  # same request sent twice (double tap / retry): return the original, move nothing
+            return jsonify({"ok": True, "transaction": customer_txn(dup, dup["from_account_id"])})
+    sender = my_account(db, g.user["id"])
+    if not sender:
+        raise TxnError("You need an approved bank account first", 409, "no_account")
+    rec = find_active_account(db, d.get("to"))
+    if not rec:
+        raise TxnError("Recipient not found or account not active", 404)
+    if rec["id"] == sender["id"]:
+        raise TxnError("You cannot send money to yourself")
+    fee = TRANSFER_FEE_PAISA
+    apply_money(db, [(sender["id"], -(amount + fee)), (rec["id"], amount)], fee=fee)
+    t = log_txn(db, "transfer", amount, sender["id"], rec["id"], fee, note, idem=idem)
+    notify(db, g.user["id"], "transaction", "Transfer Successful", f"{bdt(amount)} sent to {rec['name']}")
+    notify(db, rec["user_id"], "transaction", "Money Received", f"You received {bdt(amount)} from {g.user['name']}")
+    return jsonify({"ok": True, "transaction": customer_txn(t, sender["id"])}), 201
+
+
+def goal_json(r):
+    return {"id": r["id"], "name": r["name"], "target": taka(r["target_paisa"]), "saved": taka(r["saved_paisa"]),
+            "deadline": r["deadline"]}
+
+
+@app.get("/api/savings")
+@auth_required(("customer",))
+def list_goals():
+    rows = get_db().execute("SELECT * FROM savings_goals WHERE user_id=? ORDER BY id DESC", (g.user["id"],)).fetchall()
+    return jsonify([goal_json(r) for r in rows])
+
+
+@app.post("/api/savings")
+@auth_required(("customer",))
+def create_goal():
+    d = body()
+    name = (d.get("name") or "").strip()[:40]
+    target = to_paisa(d.get("target"), MAX_RESERVE_OP_PAISA)
+    deadline = (d.get("deadline") or "").strip()[:10] or None
+    if len(name) < 2 or not target:
+        return err("Enter a goal name and a valid target amount")
+    db = get_db()
+    db.execute("INSERT INTO savings_goals (user_id, name, target_paisa, deadline, created_at) VALUES (?,?,?,?,?)",
+               (g.user["id"], name, target, deadline, now()))
+    db.commit()
+    return jsonify({"ok": True}), 201
+
+
+@app.post("/api/savings/<int:gid>/<action>")
+@auth_required(("customer",))
+@guarded
+def goal_move(gid, action):
+    if action not in ("contribute", "withdraw"):
+        return err("Unknown action", 404)
+    db = get_db()
+    amount = to_paisa(body().get("amount"), MAX_TRANSFER_PAISA)
+    if not amount:
+        return err("Enter a valid amount")
+    goal = db.execute("SELECT * FROM savings_goals WHERE id=? AND user_id=?", (gid, g.user["id"])).fetchone()
+    acc = my_account(db, g.user["id"])
+    if not goal or not acc:
+        raise TxnError("Savings goal not found", 404)
+    if action == "contribute":
+        if goal["saved_paisa"] + amount > goal["target_paisa"]:
+            raise TxnError(f"Only {bdt(goal['target_paisa'] - goal['saved_paisa'])} is needed to reach this goal")
+        apply_money(db, [(acc["id"], -amount)])
+        db.execute("UPDATE savings_goals SET saved_paisa=saved_paisa+? WHERE id=?", (amount, gid))
+        log_txn(db, "savings_in", amount, from_acc=acc["id"], note=goal["name"])
+    else:
+        c = db.execute("UPDATE savings_goals SET saved_paisa=saved_paisa-? WHERE id=? AND saved_paisa>=?", (amount, gid, amount))
+        if c.rowcount != 1:
+            raise TxnError("You have not saved that much in this goal")
+        apply_money(db, [(acc["id"], amount)])
+        log_txn(db, "savings_out", amount, to_acc=acc["id"], note=goal["name"])
+    return jsonify({"ok": True})
+
+
+@app.get("/api/notifications")
+@auth_required(("customer",))
+def my_notifications():
+    rows = get_db().execute("SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 50", (g.user["id"],)).fetchall()
+    return jsonify([{"id": r["id"], "type": r["type"], "title": r["title"], "body": r["body"],
+                     "time": r["created_at"], "read": bool(r["is_read"])} for r in rows])
+
+
+@app.post("/api/notifications/read")
+@auth_required(("customer",))
+def read_notifications():
+    nid = body().get("id")
+    db = get_db()
+    if nid:
+        db.execute("UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?", (int(nid), g.user["id"]))
+    else:
+        db.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (g.user["id"],))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------- admin: money + reserve
+def reserve_summary(db):
+    r = db.execute("SELECT * FROM reserve WHERE id=1").fetchone()
+    q = lambda sql, a=(): int(db.execute(sql, a).fetchone()[0])
+    wallets = q("SELECT COALESCE(SUM(balance_paisa),0) FROM accounts WHERE status='approved'")
+    savings = q("SELECT COALESCE(SUM(saved_paisa),0) FROM savings_goals")
+    added = q("SELECT COALESCE(SUM(amount_paisa),0) FROM transactions WHERE kind='reserve_add'")
+    removed = q("SELECT COALESCE(SUM(amount_paisa),0) FROM transactions WHERE kind='reserve_remove'")
+    cash_in = q("SELECT COALESCE(SUM(amount_paisa),0) FROM transactions WHERE kind='cash_in'")
+    cash_out = q("SELECT COALESCE(SUM(amount_paisa),0) FROM transactions WHERE kind='cash_out'")
+    net = added - removed
+    total = r["balance_paisa"] + wallets + savings + r["fees_paisa"]
+    return {
+        "balance": taka(r["balance_paisa"]), "fees": taka(r["fees_paisa"]),
+        "wallets": taka(wallets), "savings": taka(savings), "circulation": taka(wallets + savings),
+        "totalGenerated": taka(net), "totalAdded": taka(added), "totalRemoved": taka(removed),
+        "totalCashIn": taka(cash_in), "totalCashOut": taka(cash_out),
+        "balanced": total == net,  # reserve + wallets + savings + fees must equal everything ever generated
+    }
+
+
+@app.get("/api/admin/stats")
+@auth_required(("admin",))
+def admin_stats():
+    db = get_db()
+    q = lambda sql, a=(): int(db.execute(sql, a).fetchone()[0])
+    day_start = datetime.now(timezone(timedelta(hours=6))).replace(hour=0, minute=0, second=0, microsecond=0)
+    since = day_start.astimezone(timezone.utc).isoformat(timespec="seconds")
+    week = (day_start - timedelta(days=6)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    # last 7 days (Dhaka time) of cash-in / cash-out / transfers for the chart
+    series = {}
+    for i in range(7):
+        d = (day_start - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+        series[d] = {"date": d, "cashIn": 0, "cashOut": 0, "transfers": 0}
+    for t in db.execute("SELECT kind, amount_paisa, created_at FROM transactions WHERE created_at>=? AND kind IN ('cash_in','cash_out','transfer')", (week,)).fetchall():
+        day = datetime.fromisoformat(t["created_at"]).astimezone(timezone(timedelta(hours=6))).strftime("%Y-%m-%d")
+        key = {"cash_in": "cashIn", "cash_out": "cashOut", "transfer": "transfers"}[t["kind"]]
+        if day in series:
+            series[day][key] += taka(t["amount_paisa"])
+    recent = db.execute(TXN_SELECT + " ORDER BY t.id DESC LIMIT 8").fetchall()
+    return jsonify({
+        "pendingUsers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='pending'"),
+        "customers": q("SELECT COUNT(*) FROM users WHERE role='customer' AND status='approved'"),
+        "pendingAccounts": q("SELECT COUNT(*) FROM accounts WHERE status='pending'"),
+        "pendingCards": q("SELECT COUNT(*) FROM cards WHERE status='pending'"),
+        "totalBalance": q("SELECT COALESCE(SUM(balance_paisa),0) FROM accounts WHERE status='approved'") / 100,
+        "todayCashIn": taka(q("SELECT COALESCE(SUM(amount_paisa),0) FROM transactions WHERE kind='cash_in' AND created_at>=?", (since,))),
+        "todayTxns": q("SELECT COUNT(*) FROM transactions WHERE kind IN ('cash_in','cash_out','transfer') AND created_at>=?", (since,)),
+        "reserve": reserve_summary(db),
+        "series": list(series.values()),
+        "recent": [admin_txn(t) for t in recent],
+    })
+
+
+@app.get("/api/admin/reserve")
+@auth_required(("admin",))
+def admin_reserve():
+    db = get_db()
+    rows = db.execute(TXN_SELECT + " WHERE t.kind IN ('reserve_add','reserve_remove') ORDER BY t.id DESC LIMIT 30").fetchall()
+    return jsonify({**reserve_summary(db), "history": [admin_txn(t) for t in rows]})
+
+
+@app.post("/api/admin/reserve")
+@auth_required(("admin",))
+@guarded
+def admin_reserve_change():
+    d = body()
+    action = d.get("action")
+    if action not in ("add", "remove"):
+        return err("Unknown action", 404)
+    amount = to_paisa(d.get("amount"), MAX_RESERVE_OP_PAISA)
+    if not amount:
+        return err("Enter a valid amount (up to 2 decimals)")
+    note = (d.get("note") or "").strip()[:120] or None
+    db = get_db()
+    apply_money(db, reserve=amount if action == "add" else -amount)
+    t = log_txn(db, "reserve_add" if action == "add" else "reserve_remove", amount, note=note, admin_id=g.user["id"])
+    audit(f"reserve.{action}", f"{bdt(amount)} ref:{t['reference']}")
+    return jsonify({"ok": True, "reference": t["reference"]})
+
+
+@app.get("/api/admin/lookup")
+@auth_required(("admin",))
+def admin_lookup():
+    rec = find_active_account(get_db(), request.args.get("q"))
+    if not rec:
+        return err("No active account found (check phone / account number)", 404)
+    return jsonify({"name": rec["name"], "phone": rec["phone"], "email": rec["email"],
+                    "accountNumber": rec["account_number"], "accountType": rec["account_type"],
+                    "balance": taka(rec["balance_paisa"])})
+
+
+def _cash_op(kind):
+    d = body()
+    db = get_db()
+    amount = to_paisa(d.get("amount"), MAX_CASH_PAISA)
+    if not amount:
+        return err(f"Enter an amount up to {bdt(MAX_CASH_PAISA)} (max 2 decimals)")
+    rec = find_active_account(db, d.get("account"))
+    if not rec:
+        raise TxnError("No active account found", 404)
+    note = (d.get("note") or "").strip()[:120] or None
+    if kind == "cash_in":  # customer hands over cash -> reserve e-money goes to the customer's wallet
+        apply_money(db, [(rec["id"], amount)], reserve=-amount)
+        t = log_txn(db, "cash_in", amount, to_acc=rec["id"], note=note, admin_id=g.user["id"])
+        notify(db, rec["user_id"], "transaction", "Cash Deposit Received", f"{bdt(amount)} has been added to your account.")
+    else:  # customer takes cash -> wallet is debited and e-money returns to the reserve
+        apply_money(db, [(rec["id"], -amount)], reserve=amount)
+        t = log_txn(db, "cash_out", amount, from_acc=rec["id"], note=note, admin_id=g.user["id"])
+        notify(db, rec["user_id"], "transaction", "Cash Withdrawal", f"{bdt(amount)} was withdrawn from your account.")
+    audit(kind, f"{bdt(amount)} {rec['account_number']} ref:{t['reference']}")
+    bal = db.execute("SELECT balance_paisa FROM accounts WHERE id=?", (rec["id"],)).fetchone()[0]
+    return jsonify({"ok": True, "reference": t["reference"], "customer": rec["name"],
+                    "accountNumber": rec["account_number"], "amount": taka(amount), "newBalance": taka(bal)}), 201
+
+
+@app.post("/api/admin/cash-in")
+@auth_required(("admin",))
+@guarded
+def admin_cash_in():
+    return _cash_op("cash_in")
+
+
+@app.post("/api/admin/cash-out")
+@auth_required(("admin",))
+@guarded
+def admin_cash_out():
+    return _cash_op("cash_out")
+
+
+@app.get("/api/admin/transactions")
+@auth_required(("admin",))
+def admin_transactions():
+    kind, q = request.args.get("kind"), (request.args.get("q") or "").strip().lower()
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
+    where, args = [], []
+    if kind == "reserve":
+        where.append("t.kind IN ('reserve_add','reserve_remove')")
+    elif kind in KIND_TITLES:
+        where.append("t.kind=?")
+        args.append(kind)
+    if q:
+        like = f"%{q}%"
+        where.append("(LOWER(t.reference) LIKE ? OR LOWER(COALESCE(fu.name,'')) LIKE ? OR LOWER(COALESCE(tu.name,'')) LIKE ?"
+                     " OR LOWER(COALESCE(fa.account_number,'')) LIKE ? OR LOWER(COALESCE(ta.account_number,'')) LIKE ?)")
+        args += [like] * 5
+    sql = TXN_SELECT + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY t.id DESC LIMIT 51 OFFSET ?"
+    rows = get_db().execute(sql, (*args, offset)).fetchall()
+    return jsonify({"items": [admin_txn(t) for t in rows[:50]], "hasMore": len(rows) > 50})
 
 
 # --------------------------------------------------------- headers + frontend

@@ -3,7 +3,7 @@ import { ArrowLeft, CreditCard, Landmark, Eye, Clock } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { api } from '../api';
 import { Badge, LoadingSpinner, Modal } from '../components/ui';
-import { formatBDT } from '../data/mockData';
+import { formatBDT } from '../utils/format';
 
 const statusVariant = { pending: 'warning', approved: 'success', rejected: 'danger', blocked: 'danger' };
 const gradient = {
@@ -163,9 +163,6 @@ export default function Cards({ onBack }) {
           ))}
         </section>
 
-        <p className="text-[11px] text-slate-400 text-center">
-          Demo cards use generated test numbers. They cannot be used for real payments.
-        </p>
       </div>
 
       <Modal open={showApply} onClose={() => setShowApply(false)} title="Apply for a card" size="sm">

@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowLeft, Bell, Shield, Info, CheckCheck } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { formatDate, formatTime } from '../data/mockData';
+import { formatDate, formatTime } from '../utils/format';
 import { EmptyState } from '../components/ui';
 
 const iconMap = {

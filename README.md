@@ -1,6 +1,6 @@
-# Nirapod Bank — Digital Banking Demo
+# Nirapod Bank — Digital Banking
 
-A premium, mobile-first digital banking prototype for Bangladesh. Built as a **learning / demo application** using virtual money only.
+A mobile-first digital banking app for Bangladesh with an admin console (reserve, cash desk, approvals, ledger).
 
 ## Features
 
@@ -13,9 +13,8 @@ A premium, mobile-first digital banking prototype for Bangladesh. Built as a **l
 - Savings goals with progress and contributions
 - Profile, security, password change, notification prefs, theme toggle
 - Notifications center
-- Admin dashboard (append `#admin` to URL)
+- Admin console (append `#admin` to URL): overview, reserve, cash desk, transactions, approvals
 - Light & dark themes
-- Fully interactive client-side state
 
 ## Tech Stack
 
@@ -25,12 +24,15 @@ A premium, mobile-first digital banking prototype for Bangladesh. Built as a **l
 - Recharts (spending overview)
 - Flask + SQLite backend, React Context
 
-## How it works now (real backend)
+## How money works
 
-1. Customer registers with name, phone, email (Gmail), password -> status **pending**
-2. Admin approves in `#admin` -> customer can log in (pending/rejected/suspended users are blocked with a clear message)
-3. Customer opens **Cards** -> applies for a bank account (savings/current) -> admin approves -> account number is issued
-4. Customer applies for a card (Visa / Mastercard, debit / credit) -> admin approves (sets credit limit for credit cards) -> card is issued
+1. Customer registers -> admin approves -> customer opens a bank account (admin approves, account number issued) -> optional Visa/Mastercard card.
+2. **Reserve** (Admin -> Reserve): the bank generates e-money into a reserve, e.g. ৳500 Cr or ৳1000 Cr. Every addition/removal is logged.
+3. **Cash desk** (Admin -> Cash desk): customer hands over cash -> admin finds the customer by phone / account number, enters the amount, confirms -> the amount moves **from the reserve to the customer's wallet**. Cash withdrawal does the reverse. The reserve can never go below zero.
+4. Customers can send money to other customers (flat fee, default ৳10, `TRANSFER_FEE`), save into goals, and see their history. Everything is stored on the server in one ledger (`transactions` table) using integer paisa, with atomic updates and idempotent transfers.
+5. **Ledger check**: reserve + wallets + savings + fees must always equal the total ever generated. The admin overview shows "Ledger balanced" (or an alert if not).
+
+Optional env vars: `TRANSFER_FEE` (default 10), `MAX_TRANSFER` (default 500000), `MAX_CASH_OP` (default 10000000).
 
 ## Getting Started
 
@@ -75,10 +77,9 @@ Set `SECRET_KEY`, `ADMIN_PASSWORD` (and optionally `ADMIN_EMAIL`, `DB_PATH` on a
 
 Open the app and append `#admin` to the URL, then log in with the admin email + password.
 
-## Important
+## Important before real launch
 
-DEMO / LEARNING PROTOTYPE. Card numbers are generated test numbers (no real payment network, no CVV stored).
-Send money, savings and demo top-up are still client-side only and are **not saved on the server yet**.
+Cards are generated numbers with no payment network behind them, and there is no SMS/email OTP, KYC document check, 2FA or regulatory licence yet. Running a real money service in Bangladesh needs a Bangladesh Bank licence / bank partnership and a security review.
 
 ## Project Structure
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { ArrowLeft, CheckCircle2, Clock, Copy } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { formatBDT, formatDate, formatTime } from '../data/mockData';
+import { formatBDT, formatDate, formatTime } from '../utils/format';
 import { Badge } from '../components/ui';
 
 export default function TxnDetail({ txnId, onBack }) {
@@ -73,9 +73,6 @@ export default function TxnDetail({ txnId, onBack }) {
           </div>
         </div>
 
-        <p className="text-xs text-center text-amber-600 dark:text-amber-400 mt-6">
-          Simulated transaction · Demo / Learning Prototype
-        </p>
       </div>
     </div>
   );

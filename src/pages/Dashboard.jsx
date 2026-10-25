@@ -4,8 +4,8 @@ import {
   PiggyBank, ChevronRight, TrendingUp, CreditCard
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { formatBDT, formatDate } from '../data/mockData';
-import { Avatar, Badge, DemoBanner } from '../components/ui';
+import { formatBDT, formatDate, greeting } from '../utils/format';
+import { Avatar, Badge } from '../components/ui';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#64748b'];
@@ -13,7 +13,7 @@ const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#64748b'
 export default function Dashboard({ onNavigate }) {
   const {
     user, balance, hideBalance, toggleHideBalance,
-    transactions, notifications, addDemoMoney,
+    transactions, notifications, account,
   } = useApp();
   const [showAdd, setShowAdd] = useState(false);
   const unread = notifications.filter((n) => !n.read).length;
@@ -30,20 +30,16 @@ export default function Dashboard({ onNavigate }) {
       }, {})
   );
 
-  const handleAddDemo = () => {
-    addDemoMoney(5000);
-    setShowAdd(false);
-  };
+  const copyAcc = () => navigator.clipboard?.writeText(user.accountNumber);
 
   return (
     <div className="pb-24 page-enter">
-      <DemoBanner />
       {/* Header */}
       <header className="px-5 pt-6 pb-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Avatar name={user.name} size="md" />
           <div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Good evening</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">{greeting()}</p>
             <h1 className="text-base font-semibold text-navy-900 dark:text-white leading-tight">
               {user.name.split(' ')[0]}
             </h1>
@@ -76,7 +72,7 @@ export default function Dashboard({ onNavigate }) {
             </p>
             <div className="mt-3 flex items-center gap-2">
               <Badge variant="success" className="!bg-emerald-500/20 !text-emerald-300">
-                Demo Account
+                {account ? `${account.accountType} account` : 'No account yet'}
               </Badge>
               <span className="text-xs text-slate-400">{user.accountNumber}</span>
             </div>
@@ -89,7 +85,7 @@ export default function Dashboard({ onNavigate }) {
         <div className="grid grid-cols-4 gap-3">
           {[
             { id: 'send', icon: Send, label: 'Send', color: 'bg-emerald-600' },
-            { id: 'add', icon: Plus, label: 'Add Demo', color: 'bg-navy-800' },
+            { id: 'add', icon: Plus, label: 'Deposit', color: 'bg-navy-800' },
             { id: 'activity', icon: ArrowDownLeft, label: 'History', color: 'bg-blue-600' },
             { id: 'cards', icon: CreditCard, label: 'Cards', color: 'bg-violet-600' },
           ].map((a) => (
@@ -206,19 +202,29 @@ export default function Dashboard({ onNavigate }) {
         </div>
       </div>
 
-      {/* Add Demo Money Modal */}
+      {/* Deposit info */}
       {showAdd && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
           <div className="absolute inset-0 bg-navy-950/50" onClick={() => setShowAdd(false)} />
           <div className="relative w-full max-w-sm bg-white dark:bg-navy-900 rounded-t-2xl sm:rounded-2xl p-6 page-enter">
-            <h3 className="text-lg font-semibold text-navy-900 dark:text-white mb-2">Add Demo Money</h3>
-            <p className="text-sm text-slate-500 mb-5">
-              Credit virtual ৳5,000 to your demo balance for testing transfers.
-            </p>
-            <div className="flex gap-3">
-              <button onClick={() => setShowAdd(false)} className="btn-secondary flex-1">Cancel</button>
-              <button onClick={handleAddDemo} className="btn-accent flex-1">Add ৳5,000</button>
-            </div>
+            <h3 className="text-lg font-semibold text-navy-900 dark:text-white mb-2">Deposit cash</h3>
+            {account ? (
+              <>
+                <p className="text-sm text-slate-500 mb-4">
+                  Visit a Nirapod counter and give the cash with your account number or phone. The balance is added to your account right away.
+                </p>
+                <div className="rounded-xl bg-slate-50 dark:bg-navy-800 p-3 flex items-center justify-between gap-2 mb-5">
+                  <div className="min-w-0">
+                    <p className="text-[11px] uppercase tracking-wide text-slate-400">Account number</p>
+                    <p className="font-mono text-sm font-medium text-navy-900 dark:text-white truncate">{user.accountNumber}</p>
+                  </div>
+                  <button onClick={copyAcc} className="text-xs font-medium text-emerald-600 shrink-0">Copy</button>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-slate-500 mb-5">Open a bank account first (Cards tab), then you can deposit cash.</p>
+            )}
+            <button onClick={() => setShowAdd(false)} className="btn-primary w-full">Done</button>
           </div>
         </div>
       )}
