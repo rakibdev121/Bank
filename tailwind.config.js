@@ -2,12 +2,15 @@
 export default {
   content: [
     "./index.html",
+    "./admin.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
   darkMode: 'class',
   theme: {
     extend: {
       colors: {
+        ink: { 950: '#060b15', 900: '#0a1220', 850: '#0e182b', 800: '#121f36', 700: '#1a2b47', 600: '#26395a', 500: '#3a5078', 400: '#6b82a8', 300: '#9db0cf' },
+        brand: { 400: '#4d94ff', 500: '#2f7bff', 600: '#1f64e6', 700: '#184fb8' },
         navy: {
           50: '#f0f4f8',
           100: '#d9e2ec',

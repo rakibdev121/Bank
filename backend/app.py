@@ -1030,11 +1030,15 @@ def admin_stats():
     q = lambda sql, a=(): int(db.execute(sql, a).fetchone()[0])
     day_start = datetime.now(timezone(timedelta(hours=6))).replace(hour=0, minute=0, second=0, microsecond=0)
     since = day_start.astimezone(timezone.utc).isoformat(timespec="seconds")
-    week = (day_start - timedelta(days=6)).astimezone(timezone.utc).isoformat(timespec="seconds")
-    # last 7 days (Dhaka time) of cash-in / cash-out / transfers for the chart
+    try:
+        days = min(90, max(7, int(request.args.get("days", 7))))
+    except ValueError:
+        days = 7
+    week = (day_start - timedelta(days=days - 1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    # last N days (Dhaka time) of cash-in / cash-out / transfers for the chart
     series = {}
-    for i in range(7):
-        d = (day_start - timedelta(days=6 - i)).strftime("%Y-%m-%d")
+    for i in range(days):
+        d = (day_start - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
         series[d] = {"date": d, "cashIn": 0, "cashOut": 0, "transfers": 0}
     for t in db.execute("SELECT kind, amount_paisa, created_at FROM transactions WHERE created_at>=? AND kind IN ('cash_in','cash_out','transfer')", (week,)).fetchall():
         day = datetime.fromisoformat(t["created_at"]).astimezone(timezone(timedelta(hours=6))).strftime("%Y-%m-%d")
@@ -1173,6 +1177,8 @@ def spa(path):
         return err("Not found", 404)
     if not os.path.isdir(DIST_DIR):
         return "API running. Build the frontend (npm run build) to serve it here.", 200
+    if path.rstrip("/") == "admin":  # desktop admin panel (separate entry point)
+        return send_from_directory(DIST_DIR, "admin.html")
     full = os.path.join(DIST_DIR, path)
     if path and os.path.isfile(full):
         return send_from_directory(DIST_DIR, path)
