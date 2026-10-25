@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Eye, EyeOff, Shield, ArrowLeft, Clock } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, Clock } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { LoadingSpinner } from '../components/ui';
 import { api } from '../api';
@@ -73,10 +73,10 @@ export default function Auth({ onSuccess }) {
     <div className="min-h-screen bg-slate-50 dark:bg-navy-950 flex flex-col">
       <div className="flex-1 flex flex-col justify-center px-6 py-10 max-w-md mx-auto w-full">
         <div className="text-center mb-8">
-          <div className="inline-flex w-14 h-14 rounded-2xl bg-navy-900 dark:bg-emerald-600 items-center justify-center mb-4">
-            <Shield className="w-7 h-7 text-white" />
+          <div className="inline-flex w-16 h-16 rounded-2xl bg-white shadow-card border border-slate-100 items-center justify-center mb-4">
+            <img src="/app-logo-mark.png" alt="" className="h-11 w-auto" />
           </div>
-          <h1 className="text-2xl font-bold text-navy-900 dark:text-white">Nirapod Bank</h1>
+          <h1 className="text-2xl font-bold text-navy-900 dark:text-white">nirapod-bank</h1>
           <p className="text-sm text-slate-500 mt-1">Secure digital banking for Bangladesh</p>
           <span className="inline-block mt-3 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
             DEMO PROTOTYPE

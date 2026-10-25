@@ -77,6 +77,8 @@ Set `SECRET_KEY`, `ADMIN_PASSWORD` (and optionally `ADMIN_EMAIL`, `DB_PATH` on a
 
 A full desktop admin website lives at **`/admin`** (dev: `http://localhost:5173/admin.html`, production: `https://your-host/admin`). Files: `admin.html`, `src/admin/`. Pages: Dashboard (stats, volume chart, account types, recent transactions), Customers, Accounts, Cards (approve / reject / suspend / block), Transactions (filter, search, load more), Cash desk, Reserve, Settings. It uses the same Flask `/api/admin/*` endpoints. The icons in `public/icons/` (favicon, PWA, apple-touch) are generated from the nirapod-bank logo (`public/brand/`).
 
+The customer app uses the light nirapod-bank logo (icons `public/icons/app-*`, `public/manifest.webmanifest`); the admin panel uses the dark ADMIN logo.
+
 The older mobile-style console is still available at `#admin` on the customer app.
 
 ### Admin (legacy mobile console)

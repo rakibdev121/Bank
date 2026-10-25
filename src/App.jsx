@@ -80,8 +80,8 @@ export default function App() {
       {/* Desktop sidebar hint */}
       <div className="hidden lg:block fixed left-0 top-0 bottom-0 w-56 bg-navy-900 text-white p-6">
         <div className="flex items-center gap-2 mb-8">
-          <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-sm font-bold">N</div>
-          <span className="font-semibold">Nirapod</span>
+          <div className="w-9 h-9 rounded-lg bg-white flex items-center justify-center"><img src="/app-logo-mark.png" alt="" className="h-6 w-auto" /></div>
+          <span className="font-semibold">nirapod-bank</span>
         </div>
         <nav className="space-y-1 text-sm">
           {[
